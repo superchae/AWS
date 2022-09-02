@@ -1,0 +1,16 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>수정</title>
+    </head>
+    <body>
+        <h2>주소록 수정</h2>
+        <form action='/updateAf/<%= contact.id %>' method='post'>
+            이름 : <input type='text' name='name' value="<%= contact.name %>"><br>
+            전화번호 : <input type='text' name='number' value="<%= contact.number %>"><br>
+            e-mail : <input type='text' name='email' value="<%= contact.email %>"><br>
+            <button type="submit"> 수정 </button>
+        </form>
+        <button onclick="location.href='/'"> 홈으로 </button>
+    </body>
+</html>

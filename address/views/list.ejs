@@ -1,0 +1,51 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>주소록</title>
+    </head>
+    <body>
+        <h2>주소록 리스트</h2>
+
+        <form action="/search" method="GET">
+            <label for="search"> 검색 </label>
+            <select name="field" id="search">
+                <option value="name" name="name">Name</option>
+                <option value="number" name="number">Number</option>
+                <option value="email" name="email">E-mail</option>
+            </select>
+            <input type="text" name="info">
+            <input type="submit" value="검색">
+        </form>
+
+        <button onclick="location.href='../write'"> 주소록 등록 </button>
+        <br></br>
+        <table border='1'>
+            <colgroup>
+                <col width='60'><col width='200'><col width='100'>
+            </colgroup>
+            <thead>
+                <tr>
+                    <th>이름</th>
+                    <th>전화번호</th>
+                    <th>e-mail</th>
+                    <th>수정/삭제</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% for(i = 0; i < contacts.length; i++) { %>
+                <tr>
+                    <td><%=contacts[i].name %></td>
+                    <td><%=contacts[i].number %></td>
+                    <td><%=contacts[i].email %></td>
+                    <td>
+                        <button onclick="location.href='../update/<%=contacts[i].id %>'" > 수정 </button>
+                        <button onclick="location.href='../delete/<%=contacts[i].id %>'"> 삭제 </button>
+                    </td>
+                </tr>
+                <% } %>
+            </tbody>
+        </table boader='1'>
+
+        <button onclick="location.href='/'"> 홈으로 </button>
+    </body>
+</html>
