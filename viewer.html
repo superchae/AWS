@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JCE-KVS-VIEWER</title>
+    <script src="aws-sdk-all-2.1646.0.js"></script>
+    <script src="https://unpkg.com/amazon-kinesis-video-streams-webrtc/dist/kvs-webrtc.min.js"></script>
+    <style>
+        video {
+            object-fit: contain;
+            max-height: 100vh;
+            max-width: 100vw;
+            transform: rotate(0deg) !important;
+            -webkit-transform: rotate(0deg) !important;
+        }
+
+        #remote-view {
+            width: 100%;
+            height: auto;
+        }
+        #local-view {
+            width: 30%;
+            height: auto;
+        }
+    </style>
+</head>
+<body>
+    <video id="remote-view"></video>
+    <video id="local-view" 
+        playsinline
+        webkit-playsinline
+        x5-playsinline
+        t7-video-player-fullscreen="false"
+        x5-video-orientation="portraint"
+        controlslist="noplaybackrate nofullscreen"
+        disablePictureInPicture 
+        autoplay>
+    </video>
+
+    <script>
+        (async function() {
+            /////// Set Up Variables
+
+            // <video> HTML elements to use to display the local webcam stream and remote stream from the master
+            const localView = document.querySelector('#local-view');
+            const remoteView = document.querySelector('#remote-view');
+
+            const region = 'ap-northeast-2';
+            const clientId = 'RANDOM_VALUE';
+
+
+            /////// Create KVS Client
+            const kinesisVideoClient = new AWS.KinesisVideo({
+                region,
+                accessKeyId,
+                secretAccessKey,
+                correctClockSkew: true,
+            });
+
+
+            /////// Get Signaling Channel Endpoints
+            const getSignalingChannelEndpointResponse = await kinesisVideoClient
+                .getSignalingChannelEndpoint({
+                    ChannelARN: channelARN,
+                    SingleMasterChannelEndpointConfiguration: {
+                        Protocols: ['WSS', 'HTTPS'],
+                        Role: KVSWebRTC.Role.VIEWER,
+                    },
+                })
+                .promise();
+            const endpointsByProtocol = getSignalingChannelEndpointResponse.ResourceEndpointList.reduce((endpoints, endpoint) => {
+                endpoints[endpoint.Protocol] = endpoint.ResourceEndpoint;
+                return endpoints;
+            }, {});
+            
+
+            /////// Create KVS Signaling Client
+            const kinesisVideoSignalingChannelsClient = new AWS.KinesisVideoSignalingChannels({
+                region,
+                accessKeyId,
+                secretAccessKey,
+                endpoint: endpointsByProtocol.HTTPS,
+                correctClockSkew: true,
+            });
+
+
+            //////// Get ICE server configuration
+            const getIceServerConfigResponse = await kinesisVideoSignalingChannelsClient
+                .getIceServerConfig({
+                    ChannelARN: channelARN,
+                })
+                .promise();
+            const iceServers = [
+                { urls: `stun:stun.kinesisvideo.${region}.amazonaws.com:443` }
+            ];
+            getIceServerConfigResponse.IceServerList.forEach(iceServer =>
+                iceServers.push({
+                    urls: iceServer.Uris,
+                    username: iceServer.Username,
+                    credential: iceServer.Password,
+                }),
+            );
+
+            /////// Create RTCPeerConnection
+            const peerConnection = new RTCPeerConnection({ iceServers });
+
+
+            /////// Create WebRTC Signaling Client
+            signalingClient = new KVSWebRTC.SignalingClient({
+                channelARN,
+                channelEndpoint: endpointsByProtocol.WSS,
+                clientId,
+                role: KVSWebRTC.Role.VIEWER,        // VIEWER <> MASTER
+                region,
+                credentials: {
+                    accessKeyId,
+                    secretAccessKey,
+                },
+                systemClockOffset: kinesisVideoClient.config.systemClockOffset,
+            });
+
+
+            /////// Add Signaling Client Event Listeners
+            // Once the signaling channel connection is open, connect to the webcam and create an offer to send to the master
+            signalingClient.on('open', async () => {
+                // Get a stream from the webcam, add it to the peer connection, and display it in the local view
+                try {
+                    if (localView.srcObject) {
+                        localView.srcObject.getVideoTracks().forEach(track => {
+                            track.stop();
+                        });
+                    }
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = devices.filter(device => device.kind === "videoinput");
+                    const localStream = await navigator.mediaDevices.getUserMedia({
+                        video: { deviceId: { exact: videoDevices[0].deviceId } },
+                        audio: true,
+                    });
+                    localStream.getTracks().forEach(track => {
+                        peerConnection.addTrack(track, localStream);
+                    });
+
+                    localView.srcObject = localStream;
+                } catch (e) {
+                    // Could not find webcam
+                    console.log(e);
+                    return;
+                }
+
+                // Create an SDP offer and send it to the master
+                // If there is no concern about browser compatibility, using `addTransceiver` would be better
+                const offer = await peerConnection.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: true,
+                });
+                await peerConnection.setLocalDescription(offer);
+                signalingClient.sendSdpOffer(peerConnection.localDescription);
+            });
+
+            // When the SDP answer is received back from the master, add it to the peer connection.
+            signalingClient.on('sdpAnswer', async answer => {
+                await peerConnection.setRemoteDescription(answer);
+            });
+
+            // When an ICE candidate is received from the master, add it to the peer connection.
+            signalingClient.on('iceCandidate', candidate => {
+                peerConnection.addIceCandidate(candidate);
+            });
+
+            signalingClient.on('close', () => {
+                // Handle client closures
+            });
+
+            signalingClient.on('error', error => {
+                // Handle client errors
+            });
+
+
+            /////// Add Peer Connection Event Listeners
+            // Send any ICE candidates generated by the peer connection to the other peer
+            peerConnection.addEventListener('icecandidate', ({ candidate }) => {
+                if (candidate) {
+                    signalingClient.sendIceCandidate(candidate);
+                } else {
+                    // No more ICE candidates will be generated
+                }
+            });
+
+            // As remote tracks are received, add them to the remote view
+            peerConnection.addEventListener('track', event => {
+                if (remoteView.srcObject) {
+                    return;
+                }
+                remoteView.srcObject = event.streams[0];
+            });
+
+
+            /////// Open Signaling Connection
+            signalingClient.open();
+        })();
+    </script>
+</body>
+</html>
