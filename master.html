@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KVS WebRTC Master Browser</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .video-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        video {
+            width: 480px;
+            height: 360px;
+            background-color: #000;
+            border: 1px solid #ccc;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input, button {
+            padding: 8px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        .status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>KVS WebRTC Master Browser</h1>
+
+    <div class="form-group">
+        <label for="channelName">Channel Name:</label>
+        <input type="text" id="channelName" placeholder="Enter channel name">
+    </div>
+
+    <div class="form-group">
+        <label for="accessKeyId">AWS Access Key ID:</label>
+        <input type="text" id="accessKeyId" placeholder="Enter access key">
+    </div>
+
+    <div class="form-group">
+        <label for="secretAccessKey">AWS Secret Access Key:</label>
+        <input type="password" id="secretAccessKey" placeholder="Enter secret key">
+    </div>
+
+    <div class="form-group">
+        <label for="region">AWS Region:</label>
+        <input type="text" id="region" value="us-west-2" placeholder="Enter AWS region">
+    </div>
+
+    <div class="form-group">
+        <button id="startMasterButton">Start Master</button>
+        <button id="stopMasterButton" disabled>Stop Master</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="video-container">
+        <div>
+            <h3>Local Video (Master)</h3>
+            <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+        <div>
+            <h3>Remote Video (Viewer)</h3>
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+    </div>
+
+    <!-- AWS SDK 및 KVS WebRTC SDK 추가 -->
+    <script src="https://unpkg.com/amazon-kinesis-video-streams-webrtc/dist/kvs-webrtc.min.js"></script>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.585.0.min.js"></script>
+    
+    <script>
+        // DOM 요소 참조
+        const startMasterButton = document.getElementById('startMasterButton');
+        const stopMasterButton = document.getElementById('stopMasterButton');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusElement = document.getElementById('status');
+
+        // 상태 값
+        let signalingClient = null;
+        let localStream = null;
+        let peerConnection = null;
+        let viewerClientId = null;
+        
+        // Master 시작
+        startMasterButton.addEventListener('click', async () => {
+            const channelName = document.getElementById('channelName').value;
+            const accessKeyId = document.getElementById('accessKeyId').value;
+            const secretAccessKey = document.getElementById('secretAccessKey').value;
+            const region = document.getElementById('region').value;
+            
+            if (!channelName || !accessKeyId || !secretAccessKey || !region) {
+                updateStatus('모든 필드를 입력해주세요.');
+                return;
+            }
+            
+            updateStatus('Master 초기화 중...');
+            
+            try {
+                // 1. AWS SDK 설정
+                AWS.config.update({
+                    region: region,
+                    credentials: new AWS.Credentials({
+                        accessKeyId: accessKeyId,
+                        secretAccessKey: secretAccessKey
+                    })
+                });
+                
+                // 2. Kinesis Video 클라이언트 생성
+                const kinesisVideoClient = new AWS.KinesisVideo({
+                    region: region,
+                    correctClockSkew: true
+                });
+                
+                // 3. 채널 확인 및 생성 (없는 경우)
+                try {
+                    await kinesisVideoClient.describeSignalingChannel({
+                        ChannelName: channelName
+                    }).promise();
+                    updateStatus(`채널 '${channelName}'이(가) 존재합니다.`);
+                } catch (error) {
+                    if (error.name === 'ResourceNotFoundException') {
+                        updateStatus(`채널 '${channelName}'을(를) 생성합니다...`);
+                        await kinesisVideoClient.createSignalingChannel({
+                            ChannelName: channelName,
+                            ChannelType: 'SINGLE_MASTER'
+                        }).promise();
+                        updateStatus(`채널 '${channelName}'이(가) 생성되었습니다.`);
+                    } else {
+                        throw error;
+                    }
+                }
+                
+                // 4. 채널 ARN 가져오기
+                const describeChannelResponse = await kinesisVideoClient.describeSignalingChannel({
+                    ChannelName: channelName
+                }).promise();
+                const channelARN = describeChannelResponse.ChannelInfo.ChannelARN;
+                
+                // 5. 시그널링 채널 엔드포인트 가져오기
+                const getSignalingChannelEndpointResponse = await kinesisVideoClient
+                    .getSignalingChannelEndpoint({
+                        ChannelARN: channelARN,
+                        SingleMasterChannelEndpointConfiguration: {
+                            Protocols: ['WSS', 'HTTPS'],
+                            Role: KVSWebRTC.Role.MASTER
+                        }
+                    }).promise();
+                
+                const endpointsByProtocol = getSignalingChannelEndpointResponse.ResourceEndpointList.reduce((endpoints, endpoint) => {
+                    endpoints[endpoint.Protocol] = endpoint.ResourceEndpoint;
+                    return endpoints;
+                }, {});
+                
+                // 6. 시그널링 채널 클라이언트 생성
+                const kinesisVideoSignalingChannelsClient = new AWS.KinesisVideoSignalingChannels({
+                    region: region,
+                    endpoint: endpointsByProtocol.HTTPS,
+                    correctClockSkew: true
+                });
+                
+                // 7. ICE 서버 구성 가져오기
+                const getIceServerConfigResponse = await kinesisVideoSignalingChannelsClient
+                    .getIceServerConfig({
+                        ChannelARN: channelARN
+                    }).promise();
+                
+                const iceServers = [
+                    { urls: `stun:stun.kinesisvideo.${region}.amazonaws.com:443` }
+                ];
+                
+                getIceServerConfigResponse.IceServerList.forEach(iceServer =>
+                    iceServers.push({
+                        urls: iceServer.Uris,
+                        username: iceServer.Username,
+                        credential: iceServer.Password
+                    })
+                );
+                
+                // 8. 웹캠에서 미디어 스트림 가져오기
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: true
+                });
+                
+                localVideo.srcObject = localStream;
+                
+                // 9. 시그널링 클라이언트 생성
+                signalingClient = new KVSWebRTC.SignalingClient({
+                    channelARN,
+                    channelEndpoint: endpointsByProtocol.WSS,
+                    role: KVSWebRTC.Role.MASTER,
+                    region: region,
+                    credentials: {
+                        accessKeyId,
+                        secretAccessKey
+                    },
+                    systemClockOffset: kinesisVideoClient.config.systemClockOffset
+                });
+                
+                // 10. 시그널링 클라이언트 이벤트 처리
+                signalingClient.on('open', async () => {
+                    updateStatus('시그널링 채널이 열렸습니다. Viewer 연결을 기다리는 중...');
+                    startMasterButton.disabled = true;
+                    stopMasterButton.disabled = false;
+                });
+                
+                signalingClient.on('sdpOffer', async (offer, clientId) => {
+                    // 이미 연결된 viewer가 있는 경우, 새로운 연결 무시
+                    if (peerConnection && viewerClientId) {
+                        console.log(`이미 Viewer ${viewerClientId}와 연결되어 있습니다. 새 연결 요청 무시: ${clientId}`);
+                        return;
+                    }
+                    
+                    viewerClientId = clientId;
+                    updateStatus(`Viewer ${clientId}로부터 연결 요청을 받았습니다.`);
+                    
+                    // Peer Connection 생성
+                    peerConnection = new RTCPeerConnection({ iceServers });
+                    
+                    // 로컬 미디어 스트림 추가
+                    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                    
+                    // ICE 후보 수집 시 Viewer에게 전송
+                    peerConnection.addEventListener('icecandidate', ({ candidate }) => {
+                        if (candidate) {
+                            signalingClient.sendIceCandidate(candidate, clientId);
+                        }
+                    });
+                    
+                    // 원격 트랙을 받았을 때 (Viewer가 자신의 비디오를 보내는 경우)
+                    peerConnection.addEventListener('track', event => {
+                        updateStatus(`Viewer ${clientId}로부터 미디어 트랙을 받았습니다.`);
+                        remoteVideo.srcObject = event.streams[0];
+                    });
+                    
+                    // 연결 상태 변경 이벤트
+                    peerConnection.addEventListener('connectionstatechange', () => {
+                        updateStatus(`연결 상태: ${peerConnection.connectionState}`);
+                        if (peerConnection.connectionState === 'connected') {
+                            updateStatus('Viewer와 연결되었습니다.');
+                        } else if (peerConnection.connectionState === 'disconnected' || 
+                                   peerConnection.connectionState === 'failed' || 
+                                   peerConnection.connectionState === 'closed') {
+                            updateStatus('Viewer와 연결이 끊어졌습니다.');
+                            // 다시 새로운 연결을 받을 수 있도록 설정
+                            viewerClientId = null;
+                            if (peerConnection) {
+                                peerConnection.close();
+                                peerConnection = null;
+                            }
+                            remoteVideo.srcObject = null;
+                        }
+                    });
+                    
+                    // SDP 제안 설정 및 응답 생성
+                    await peerConnection.setRemoteDescription(offer);
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    
+                    // SDP 응답을 Viewer에게 전송
+                    signalingClient.sendSdpAnswer(answer, clientId);
+                    updateStatus(`Viewer ${clientId}에게 SDP 응답을 보냈습니다.`);
+                });
+                
+                signalingClient.on('iceCandidate', (candidate, clientId) => {
+                    // 연결된 Viewer가 있는 경우에만 ICE 후보 추가
+                    if (peerConnection && viewerClientId === clientId) {
+                        peerConnection.addIceCandidate(candidate);
+                    }
+                });
+                
+                signalingClient.on('close', () => {
+                    updateStatus('시그널링 채널이 닫혔습니다.');
+                    resetState();
+                });
+                
+                signalingClient.on('error', error => {
+                    updateStatus(`오류 발생: ${error.message}`);
+                    console.error('시그널링 클라이언트 오류:', error);
+                    resetState();
+                });
+                
+                // 시그널링 채널 연결
+                signalingClient.open();
+                
+            } catch (error) {
+                updateStatus(`오류 발생: ${error.message}`);
+                console.error('Master 시작 중 오류 발생:', error);
+                resetState();
+            }
+        });
+        
+        // Master 중지
+        stopMasterButton.addEventListener('click', () => {
+            resetState();
+            updateStatus('Master가 중지되었습니다.');
+        });
+        
+        // 상태 업데이트 함수
+        function updateStatus(message) {
+            statusElement.textContent = message;
+            console.log(message);
+        }
+        
+        // 상태 초기화 함수
+        function resetState() {
+            // 시그널링 클라이언트 닫기
+            if (signalingClient) {
+                signalingClient.close();
+                signalingClient = null;
+            }
+            
+            // 피어 연결 닫기
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            viewerClientId = null;
+            
+            // 로컬 스트림 중지
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            
+            // 비디오 요소 초기화
+            localVideo.srcObject = null;
+            remoteVideo.srcObject = null;
+            
+            // 버튼 상태 업데이트
+            startMasterButton.disabled = false;
+            stopMasterButton.disabled = true;
+        }
+    </script>
+</body>
+</html>
