@@ -4,50 +4,157 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JCE-KVS-VIEWER</title>
-    <script src="aws-sdk-all-2.1646.0.js"></script>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.585.0.min.js"></script>
     <script src="https://unpkg.com/amazon-kinesis-video-streams-webrtc/dist/kvs-webrtc.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.bundle.min.js"></script>
+
+    <!-- <script type="module" src="./eventMasterHandler.js"></script> -->
+
     <style>
-        video {
-            object-fit: contain;
-            max-height: 100vh;
-            max-width: 100vw;
+        body, html {
+            padding:0;
+            position:relative;
+            height: 100%;
+        }
+        #remoteDiv {
+            height:85vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow:hidden;
+        }
+        #localDiv {
+            height:20vh;
+            top: calc(65vh - 10vh); 
+            right:1vw;
+            width : 30vw;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: fixed;
+            overflow:hidden;
+            margin-left : auto;
+        }
+        video,img {
+            max-width: 100%;
+            max-height: 100%;
+            width : 100%;
+            height:100%;
+            object-fit:contain;
             transform: rotate(0deg) !important;
             -webkit-transform: rotate(0deg) !important;
         }
-
         #remote-view {
-            width: 100%;
-            height: auto;
+            max-width: 100%;
+            max-height: 100%;
+            width : 100%;
+            height:100%;
+            display: none;
         }
         #local-view {
-            width: 30%;
-            height: auto;
+            max-width: 100%;
+            max-height: 100%;
+            width : 100%;
+            height:100%;
+            display: none;
+        }
+        #buttons {
+            position:absolute;
+            bottom:10px;
+            width:100%;
+            display: flex;
+            justify-content: center;
+            padding: 10px;
+            gap: 10px;
+        }
+        button {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
         }
     </style>
 </head>
 <body>
-    <video id="remote-view"></video>
-    <video id="local-view" 
-        playsinline
-        webkit-playsinline
-        x5-playsinline
-        t7-video-player-fullscreen="false"
-        x5-video-orientation="portraint"
-        controlslist="noplaybackrate nofullscreen"
-        disablePictureInPicture 
-        autoplay>
-    </video>
+    <!-- 로딩 스피너 -->
+    <button id="remote-video-spinner-icon" class="btn btn-secondary remote-video-spinner p-2 d-none" type="button" disabled="">
+        <span class="spinner-border spinner-border-lg" aria-hidden="true"></span>
+    </button>
+    <div id="remoteDiv">
+        <video id="remote-view"
+            playsinline
+            webkit-playsinline
+            x5-playsinline
+            t7-video-player-fullscreen="false"
+            x5-video-orientation="portraint"
+            controlslist="noplaybackrate nofullscreen"
+            disablePictureInPicture 
+            autoplay>
+        </video>
+        <img id="remote-profile" src="https://mblogthumb-phinf.pstatic.net/MjAyMDAyMTBfODAg/MDAxNTgxMzA0MTE3ODMy.ACRLtB9v5NH-I2qjWrwiXLb7TeUiG442cJmcdzVum7cg.eTLpNg_n0rAS5sWOsofRrvBy0qZk_QcWSfUiIagTfd8g.JPEG.lattepain/1581304118739.jpg?type=w800">
+    </div>
+    <div id="localDiv">
+        <video id="local-view"
+            class="m-2"
+            playsinline
+            webkit-playsinline
+            x5-playsinline
+            t7-video-player-fullscreen="false"
+            x5-video-orientation="portraint"
+            controlslist="noplaybackrate nofullscreen"
+            disablePictureInPicture
+            muted
+            autoplay>
+        </video>
+        <img id="local-profile" src="https://mblogthumb-phinf.pstatic.net/MjAyMDAyMTBfODAg/MDAxNTgxMzA0MTE3ODMy.ACRLtB9v5NH-I2qjWrwiXLb7TeUiG442cJmcdzVum7cg.eTLpNg_n0rAS5sWOsofRrvBy0qZk_QcWSfUiIagTfd8g.JPEG.lattepain/1581304118739.jpg?type=w800">
+    </div>
+    <!-- 버튼 -->
+    <div id="buttons" class="fixed-bottom d-flex gap-2 justify-content-center mb-3">
+        <!-- <button id="stop-viewer-button" type="button" class="btn btn-danger">Stop Viewer</button> -->
 
+        <button id="change-camera-button" class="btn btn-primary rounded-circle lh-1 m-2" type="button" onclick="onChangeCameraView()">
+            change camera
+        </button>
+
+        <button id="mute-camera-button" class="btn btn-primary rounded-circle lh-1 m-2" type="button" onclick="onMuteCamera()">
+            mute camera
+        </button>
+        <button id="mute-mic-button" class="btn btn-primary rounded-circle m-2" type="button" onclick="onMuteMic()">
+            mute MIC
+        </button>
+        <button id="mute-audio" class="btn btn-primary rounded-circle m-2" type="button" onclick="onMuteAudio()">
+            mute auido
+        </button>
+        <button id="stop-call-button" class="btn btn-danger rounded-circle m-2" type="button" onclick="onStop()">
+            stop
+        </button>
+    </div>
     <script>
+        let peerConnection = null;
+
         (async function() {
             /////// Set Up Variables
+            // DescribeSignalingChannel API can also be used to get the ARN from a channel name.
+            // const channelARN = 'arn:aws:kinesisvideo:ap-northeast-2:376348955842:channel/POC2/1744606086586';
+
+            // Channel
+            const channelName = 'TEST';
+
+            // AWS Credentials
+            const accessKeyId = 'TEST';
+            const secretAccessKey = 'TEST';
 
             // <video> HTML elements to use to display the local webcam stream and remote stream from the master
             const localView = document.querySelector('#local-view');
             const remoteView = document.querySelector('#remote-view');
+            const remoteProfile = document.getElementById('remote-profile');
+            const localProfile = document.getElementById('local-profile');
 
             const region = 'ap-northeast-2';
-            const clientId = 'RANDOM_VALUE';
+            const clientId = Math.random().toString(36);
 
 
             /////// Create KVS Client
@@ -58,6 +165,14 @@
                 correctClockSkew: true,
             });
 
+            /////// use DescribeSignalingChannel API to get the ARN from a channel name.
+            const describeSignalingChannelResponse = await kinesisVideoClient
+                .describeSignalingChannel({
+                    ChannelName: channelName
+                })
+                .promise();
+            const channelARN = describeSignalingChannelResponse.ChannelInfo.ChannelARN;
+            console.log(channelARN);
 
             /////// Get Signaling Channel Endpoints
             const getSignalingChannelEndpointResponse = await kinesisVideoClient
@@ -103,7 +218,7 @@
             );
 
             /////// Create RTCPeerConnection
-            const peerConnection = new RTCPeerConnection({ iceServers });
+            peerConnection = new RTCPeerConnection({ iceServers });
 
 
             /////// Create WebRTC Signaling Client
@@ -142,6 +257,8 @@
                     });
 
                     localView.srcObject = localStream;
+                    localView.style.display = "block";
+                    localProfile.style.display = "none";
                 } catch (e) {
                     // Could not find webcam
                     console.log(e);
@@ -156,16 +273,20 @@
                 });
                 await peerConnection.setLocalDescription(offer);
                 signalingClient.sendSdpOffer(peerConnection.localDescription);
+                console.log(`sendSdpOffer`);
             });
 
             // When the SDP answer is received back from the master, add it to the peer connection.
             signalingClient.on('sdpAnswer', async answer => {
+                console.log(`get sdpAnswer`);
                 await peerConnection.setRemoteDescription(answer);
+                console.log(`setRemoteDescription answer`);
             });
 
             // When an ICE candidate is received from the master, add it to the peer connection.
             signalingClient.on('iceCandidate', candidate => {
                 peerConnection.addIceCandidate(candidate);
+                console.log(`addIceCandidate ${candidate}`);
             });
 
             signalingClient.on('close', () => {
@@ -182,6 +303,7 @@
             peerConnection.addEventListener('icecandidate', ({ candidate }) => {
                 if (candidate) {
                     signalingClient.sendIceCandidate(candidate);
+                    console.log(`sendIceCandidate ${candidate}`);
                 } else {
                     // No more ICE candidates will be generated
                 }
@@ -189,16 +311,171 @@
 
             // As remote tracks are received, add them to the remote view
             peerConnection.addEventListener('track', event => {
+                console.log('remote track received');
+                console.log(remoteView.srcObject);
+                console.log(event.streams[0]);
                 if (remoteView.srcObject) {
                     return;
                 }
                 remoteView.srcObject = event.streams[0];
+                remoteView.style.display = "block";
+                remoteProfile.style.display = "none";
             });
 
 
             /////// Open Signaling Connection
             signalingClient.open();
+
+
+            // const wsHASH = 'potato';
+            // const socket = new WebSocket(`wss://pv7jlu5fe8.execute-api.ap-northeast-2.amazonaws.com/production?hash=${wsHASH}`);
+
+            // socket.addEventListener('open', function (event) {
+            //     console.log('WebSocket 연결됨');
+
+            //     console.log('requestCredential');
+            //     const requestCredential = { action: 'credential' }
+            //     socket.send(JSON.stringify(requestCredential));
+
+            //     console.log('requestContact');
+            //     const requestContact = { action: 'contact' }
+            //     socket.send(JSON.stringify(requestContact));
+
+            //     console.log('requestPing');
+            //     const requestPing = { action: 'ping' }
+            //     socket.send(JSON.stringify(requestPing));
+            // });
+            // socket.addEventListener('error', function (event) {
+            //     console.error('WebSocket 에러 발생:', event);
+            // });
+
+            // socket.addEventListener('message', function (event) {
+            //     console.log('WebSocket 서버로부터 메시지:', event.data);
+            // });
+
+            // socket.addEventListener('close', function (event) {
+            //     console.log('WebSocket 연결 종료:', event.code, event.reason);
+            // });
+
         })();
+    </script>
+
+    <script>
+        let currentCameraView = 'front';
+        let muteCamera = false;
+        let muteMic = false;
+        let muteAudio = false;
+
+        const mapVideoDevices = {
+            front: [],
+            back: []
+        }
+
+        async function setupCamera() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(device => device.kind === "videoinput");
+            videoDevices.forEach(device => {
+                if (device.label.endsWith('front')) {
+                    mapVideoDevices['front'].push(device.deviceId);
+                } else if (device.label.endsWith('back')) {
+                    mapVideoDevices['back'].push(device.deviceId);
+                }
+            });
+            console.log('mapVideoDevices:');
+            console.log(mapVideoDevices);
+        }
+
+        function onChangeCameraView() {
+            const button = document.getElementById("change-camera-button");
+            currentCameraView = (currentCameraView === 'back') ? 'front' : 'back';
+            button.innerText = "camera " + currentCameraView;
+            startCamera(currentCameraView);
+        }
+        async function startCamera(currentCameraView) {
+            const video = document.getElementById('local-view');
+            try {
+                const supports = navigator.mediaDevices.getSupportedConstraints();
+                if (!supports['facingMode']) {
+                    throw new Error('This browser does not support facingMode!');
+                }
+                if (video.srcObject) {
+                    video.srcObject.getVideoTracks().forEach(track => {
+                        track.stop();
+                    });
+                }
+                console.log(`(${currentCameraView}) deviceID: ${mapVideoDevices[currentCameraView][0]}`);
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        deviceId: {exact: mapVideoDevices[currentCameraView][0]}
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+
+                let sender = peerConnection.getSenders().find(function (s) {
+                    return s.track.kind === 'video';
+                });
+                sender.replaceTrack(stream.getVideoTracks()[0]);
+            } catch (err) {
+                alert('카메라 접근 실패: ' + err.message);
+            }
+        }
+
+        function onMuteCamera() {
+            const button = document.getElementById("mute-camera-button");
+            const video = document.getElementById('local-view');
+            if (muteCamera == true) {
+                muteCamera = false;
+                button.innerText = "unmute camera";
+            } else {
+                muteCamera = true;
+                button.innerText = "mute camera";
+            }
+            video.srcObject.getVideoTracks().forEach(track => track.enabled = muteCamera);
+        }
+
+        function onMuteMic() {
+            const button = document.getElementById("mute-mic-button");
+            const video = document.getElementById('local-view');
+            if (muteMic == true) {
+                muteMic = false;
+                button.innerText = "unmute MIC";
+            } else {
+                muteMic = true;
+                button.innerText = "mute MIC";
+            }
+            video.srcObject.getAudioTracks().forEach(track => track.enabled = muteMic);
+        }
+
+        function onMuteAudio() {
+            const button = document.getElementById("mute-audio");
+            const video = document.getElementById('remote-view');
+            
+            muteAudio = !muteAudio; // 상태 반전
+            button.innerText = muteAudio ? "unmute audio" : "mute audio";
+
+            
+            const audioTracks = video.srcObject?.getAudioTracks() || [];
+            console.log("오디오 트랙:", audioTracks);
+
+            audioTracks.forEach(track => {
+                track.enabled = !muteAudio; // true면 소리 켜짐, false면 음소거
+                console.log("track.enabled =", track.enabled);
+            });
+        }
+        function onStop() {
+            var os = window.navigator.userAgent || window.navigator.vendor || window.opera;
+
+            if (os.toLocaleLowerCase().indexOf("android") > -1) {
+                location.href = "kakaotalk://inappbrowser/close";
+            } else if (os.toLocaleLowerCase().indexOf("iphone") > -1 || os.toLocaleLowerCase().indexOf("ipad") > -1) {
+                location.href = "kakaoweb://closeBrowser";
+            } else {
+                self.close();
+            }
+            window.close();
+        }
+        setupCamera();
     </script>
 </body>
 </html>
